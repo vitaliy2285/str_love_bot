@@ -15,8 +15,15 @@ async def admin_stats(message: types.Message):
     if not _is_admin(message.from_user.id):
         return
     total = db.get_users_count()
+    active = db.get_active_users_count()
     vip = db.get_vip_count()
-    await message.answer(f"📊 Пользователей: {total}\n👑 VIP: {vip}")
+    revenue = db.get_revenue()
+    await message.answer(
+        f"📊 Пользователей: {total}\n"
+        f"🟢 Активных: {active}\n"
+        f"👑 VIP: {vip}\n"
+        f"💰 Revenue: {revenue}"
+    )
 
 
 @dp.message_handler(commands=["broadcast"])
@@ -46,6 +53,20 @@ async def broadcast_send(message: types.Message, state: FSMContext):
     await message.answer(f"Рассылка завершена. Доставлено: {sent}")
 
 
+@dp.message_handler(commands=["ban"])
+async def ban_user(message: types.Message):
+    if not _is_admin(message.from_user.id):
+        return
+
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.answer("Использование: /ban <user_id>")
+        return
+
+    banned = db.ban_user(int(parts[1]))
+    await message.answer("Пользователь забанен." if banned else "Пользователь не найден.")
+
+
 @dp.message_handler(commands=["add_fakes"])
 async def add_fakes(message: types.Message):
     if not _is_admin(message.from_user.id):
@@ -66,6 +87,8 @@ async def add_fakes(message: types.Message):
                 fake["age"],
                 fake["gender"],
                 fake["city"],
+                None,
+                None,
                 photo_id,
                 fake["bio"],
                 None,
@@ -73,6 +96,7 @@ async def add_fakes(message: types.Message):
                 0,
                 None,
                 1,
+                None,
                 None,
             )
         )

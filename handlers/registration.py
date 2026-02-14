@@ -2,7 +2,7 @@ from aiogram import types
 from aiogram.dispatcher import FSMContext
 from aiogram.types import ReplyKeyboardRemove
 
-from keyboards.reply import gender_kb, menu_kb
+from keyboards.reply import gender_kb, location_kb, menu_kb
 from loader import db, dp
 from states.forms import RegState
 
@@ -12,12 +12,14 @@ async def cmd_start(message: types.Message, state: FSMContext):
     await state.finish()
     user = db.get_user(message.from_user.id)
     if user:
+        if user["is_banned"]:
+            await message.answer("⛔ Твой аккаунт заблокирован.")
+            return
         await message.answer(f"👋 С возвращением, <b>{user['name']}</b>!", reply_markup=menu_kb())
         return
 
     await message.answer(
-        "👋 Привет! Это <b>Str.Love</b> — знакомства в Стерлитамаке.\n"
-        "Создадим анкету. Как тебя зовут?"
+        "👋 Привет! Это <b>Str.Love</b>.\nСоздадим анкету. Как тебя зовут?"
     )
     await RegState.name.set()
 
@@ -53,16 +55,25 @@ async def reg_gender(message: types.Message, state: FSMContext):
 
     async with state.proxy() as data:
         data["gender"] = gender
-    await message.answer("Из какого ты города?", reply_markup=ReplyKeyboardRemove())
-    await RegState.city.set()
+    await message.answer(
+        "Отправь геолокацию, чтобы показывать анкеты рядом.",
+        reply_markup=location_kb(),
+    )
+    await RegState.location.set()
 
 
-@dp.message_handler(state=RegState.city)
-async def reg_city(message: types.Message, state: FSMContext):
+@dp.message_handler(content_types=types.ContentTypes.LOCATION, state=RegState.location)
+async def reg_location(message: types.Message, state: FSMContext):
     async with state.proxy() as data:
-        data["city"] = message.text.strip()
-    await message.answer("Пришли фото профиля 📸")
+        data["latitude"] = message.location.latitude
+        data["longitude"] = message.location.longitude
+    await message.answer("Пришли фото профиля 📸", reply_markup=ReplyKeyboardRemove())
     await RegState.photo.set()
+
+
+@dp.message_handler(state=RegState.location)
+async def reg_location_fallback(message: types.Message):
+    await message.answer("Нажми кнопку '📍 Отправить геолокацию'.")
 
 
 @dp.message_handler(content_types=["photo"], state=RegState.photo)
@@ -87,7 +98,9 @@ async def reg_bio(message: types.Message, state: FSMContext):
                 data["name"],
                 data["age"],
                 data["gender"],
-                data["city"],
+                "Unknown",
+                data["latitude"],
+                data["longitude"],
                 data["photo_id"],
                 message.text.strip(),
                 message.from_user.username,
@@ -95,6 +108,7 @@ async def reg_bio(message: types.Message, state: FSMContext):
                 0,
                 None,
                 1,
+                None,
                 None,
             )
         )

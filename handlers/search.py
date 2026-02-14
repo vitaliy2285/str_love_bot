@@ -7,15 +7,17 @@ from states.forms import SearchState
 
 
 async def show_next_candidate(message: types.Message, state: FSMContext):
-    candidate = db.get_candidate(message.from_user.id)
-    if not candidate:
+    candidate_data = db.get_candidate(message.from_user.id)
+    if not candidate_data:
         await message.answer("Пока анкеты закончились, попробуй позже.", reply_markup=menu_kb())
         return
 
+    candidate, distance_km = candidate_data
     async with state.proxy() as data:
         data["candidate_id"] = candidate["user_id"]
 
-    caption = f"<b>{candidate['name']}, {candidate['age']}</b>\n📍 {candidate['city']}\n\n{candidate['bio']}"
+    distance_line = f"📍 {int(distance_km)} km from you" if distance_km is not None else "📍 distance unknown"
+    caption = f"<b>{candidate['name']}, {candidate['age']}</b>\n{distance_line}\n\n{candidate['bio']}"
     await message.answer_photo(candidate["photo_id"], caption=caption, reply_markup=vote_kb())
 
 
@@ -24,7 +26,7 @@ async def start_search(message: types.Message, state: FSMContext):
     await show_next_candidate(message, state)
 
 
-@dp.message_handler(text=["❤️ Лайк", "👎 Дизлайк", "💤 Стоп"])
+@dp.message_handler(text=["❤️ Лайк", "👎 Дизлайк", "⭐ Суперлайк", "💤 Стоп"])
 async def vote_candidate(message: types.Message, state: FSMContext):
     if message.text == "💤 Стоп":
         await state.finish()
@@ -38,15 +40,27 @@ async def vote_candidate(message: types.Message, state: FSMContext):
         await show_next_candidate(message, state)
         return
 
-    reaction = "like" if message.text == "❤️ Лайк" else "dislike"
+    reaction = "dislike"
+    if message.text == "❤️ Лайк":
+        reaction = "like"
+    elif message.text == "⭐ Суперлайк":
+        if not db.decrement_superlike(message.from_user.id):
+            await message.answer("Лимит суперлайков на сегодня исчерпан.")
+            return
+        reaction = "superlike"
+
     db.add_reaction(message.from_user.id, candidate_id, reaction)
 
-    if reaction == "like" and db.check_match(message.from_user.id, candidate_id):
+    if reaction in {"like", "superlike"} and db.check_match(message.from_user.id, candidate_id):
+        db.create_match(message.from_user.id, candidate_id)
         me = db.get_user(message.from_user.id)
         candidate = db.get_user(candidate_id)
-        await message.answer(f"🔥 Взаимная симпатия с <b>{candidate['name']}</b>!")
+        await message.answer(f"💘 It's a Match! <b>{candidate['name']}</b> тоже лайкнул(а) тебя. Нажмите, чтобы начать чат.")
         try:
-            await bot.send_message(candidate_id, f"🔥 У тебя мэтч с <b>{me['name']}</b>!")
+            await bot.send_message(
+                candidate_id,
+                f"💘 It's a Match! <b>{me['name']}</b> лайкнул(а) тебя в ответ. Click here to chat.",
+            )
         except Exception:
             pass
 
@@ -64,10 +78,6 @@ async def send_letter_start(message: types.Message, state: FSMContext):
     user = db.get_user(message.from_user.id)
     if user["balance"] < 5:
         await message.answer("Недостаточно монет. Открой '💎 Магазин'.", reply_markup=menu_kb())
-        return
-
-    if not db.decrement_superlike(message.from_user.id):
-        await message.answer("Лимит суперлайков на сегодня исчерпан.")
         return
 
     await message.answer("Напиши короткое сообщение для отправки пользователю:")
