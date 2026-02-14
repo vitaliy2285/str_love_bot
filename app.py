@@ -7,7 +7,7 @@ from handlers.blind_chat import cleanup_expired_blind_messages
 from loader import db, dp
 
 
-async def cleanup_loop():
+async def blind_messages_gc_loop():
     while True:
         await cleanup_expired_blind_messages()
         await asyncio.sleep(300)

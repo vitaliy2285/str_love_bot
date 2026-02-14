@@ -23,6 +23,8 @@ class Database:
                 age INTEGER,
                 gender TEXT,
                 city TEXT,
+                lat REAL,
+                lon REAL,
                 latitude REAL,
                 longitude REAL,
                 photo_id TEXT,
@@ -114,6 +116,8 @@ class Database:
         self.conn.commit()
 
     def _run_migrations(self) -> None:
+        self._ensure_column("users", "lat", "REAL")
+        self._ensure_column("users", "lon", "REAL")
         self._ensure_column("users", "latitude", "REAL")
         self._ensure_column("users", "longitude", "REAL")
         self._ensure_column("users", "is_banned", "INTEGER DEFAULT 0")
@@ -133,7 +137,7 @@ class Database:
         self.cursor.execute(
             """
             INSERT OR REPLACE INTO users (
-                user_id, name, age, gender, city, latitude, longitude, photo_id, bio, username,
+                user_id, name, age, gender, city, lat, lon, latitude, longitude, photo_id, bio, username,
                 is_active, is_banned, balance, is_vip, vip_end_date, daily_superlikes_left,
                 superlikes_reset_at, boosted_until, min_age, max_age, search_radius
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?, ?, 18, 99, 50)

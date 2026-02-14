@@ -1,10 +1,21 @@
+from typing import Union
+
 from aiogram import types
 from aiogram.dispatcher import FSMContext
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from keyboards.reply import menu_kb
 from loader import bot, db, dp
-from states.forms import SearchState
+
+CARD_PREFIX = "search:vote:"
+
+
+def vote_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(row_width=3).add(
+        InlineKeyboardButton("❌", callback_data=f"{CARD_PREFIX}dislike"),
+        InlineKeyboardButton("❤️", callback_data=f"{CARD_PREFIX}like"),
+        InlineKeyboardButton("⭐ Super", callback_data=f"{CARD_PREFIX}superlike"),
+    )
 
 
 SEARCH_CARD_PREFIX = "search:"
