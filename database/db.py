@@ -23,6 +23,8 @@ class Database:
                 age INTEGER,
                 gender TEXT,
                 city TEXT,
+                lat REAL,
+                lon REAL,
                 latitude REAL,
                 longitude REAL,
                 photo_id TEXT,
@@ -111,6 +113,8 @@ class Database:
         self.conn.commit()
 
     def _run_migrations(self) -> None:
+        self._ensure_column("users", "lat", "REAL")
+        self._ensure_column("users", "lon", "REAL")
         self._ensure_column("users", "latitude", "REAL")
         self._ensure_column("users", "longitude", "REAL")
         self._ensure_column("users", "is_banned", "INTEGER DEFAULT 0")
@@ -127,10 +131,10 @@ class Database:
         self.cursor.execute(
             """
             INSERT OR REPLACE INTO users (
-                user_id, name, age, gender, city, latitude, longitude, photo_id, bio, username,
+                user_id, name, age, gender, city, lat, lon, latitude, longitude, photo_id, bio, username,
                 is_active, is_banned, balance, is_vip, vip_end_date, daily_superlikes_left,
                 superlikes_reset_at, boosted_until
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?, ?)
             """,
             user_data,
         )
@@ -191,6 +195,15 @@ class Database:
         a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
         return 2 * radius * math.asin(math.sqrt(a))
 
+
+    @staticmethod
+    def _row_lat(row: sqlite3.Row) -> Optional[float]:
+        return row["lat"] if "lat" in row.keys() and row["lat"] is not None else row["latitude"]
+
+    @staticmethod
+    def _row_lon(row: sqlite3.Row) -> Optional[float]:
+        return row["lon"] if "lon" in row.keys() and row["lon"] is not None else row["longitude"]
+
     def get_candidate(self, user_id: int) -> Optional[Tuple[sqlite3.Row, Optional[float]]]:
         me = self.get_user(user_id)
         if not me:
@@ -220,14 +233,18 @@ class Database:
         if not candidates:
             return None
 
-        if me["latitude"] is None or me["longitude"] is None:
+        me_lat = self._row_lat(me)
+        me_lon = self._row_lon(me)
+        if me_lat is None or me_lon is None:
             return candidates[0], None
 
         closest = None
         for row in candidates:
-            if row["latitude"] is None or row["longitude"] is None:
+            row_lat = self._row_lat(row)
+            row_lon = self._row_lon(row)
+            if row_lat is None or row_lon is None:
                 continue
-            dist = self.haversine_km(me["latitude"], me["longitude"], row["latitude"], row["longitude"])
+            dist = self.haversine_km(me_lat, me_lon, row_lat, row_lon)
             if closest is None or dist < closest[1]:
                 closest = (row, dist)
 

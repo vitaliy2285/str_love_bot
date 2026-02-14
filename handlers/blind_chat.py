@@ -92,3 +92,4 @@ async def relay_blind_chat_message(message: types.Message):
     partner_id = _partner_id(active, message.from_user.id)
     sent = await bot.send_message(partner_id, f"🎭 Аноним: {message.text}")
     db.register_blind_message(active["id"], message.from_user.id, partner_id, sent.message_id)
+    db.register_blind_message(active["id"], message.from_user.id, message.from_user.id, message.message_id)

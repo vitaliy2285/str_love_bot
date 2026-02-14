@@ -4,17 +4,18 @@ from aiogram import executor
 
 from handlers import *  # noqa: F403,F401
 from handlers.blind_chat import cleanup_expired_blind_messages
-from loader import dp
+from loader import db, dp
 
 
-async def cleanup_loop():
+async def blind_messages_gc_loop():
     while True:
         await cleanup_expired_blind_messages()
         await asyncio.sleep(300)
 
 
 async def on_startup(_):
-    asyncio.create_task(cleanup_loop())
+    db.create_tables()
+    asyncio.create_task(blind_messages_gc_loop())
 
 
 if __name__ == "__main__":
