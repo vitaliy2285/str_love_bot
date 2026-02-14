@@ -9,7 +9,7 @@ from database.db import Database
 logging.basicConfig(level=logging.INFO)
 
 API_TOKEN = os.getenv("BOT_TOKEN", "8506986812:AAG9hHfIRAQeRRwHeYBYTXAfsYgDTTcrgfg")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "454707643"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "543692070"))
 
 bot = Bot(token=API_TOKEN, parse_mode="HTML")
 storage = MemoryStorage()

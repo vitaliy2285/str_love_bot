@@ -1,16 +1,18 @@
+import math
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional, Tuple
 
 
 class Database:
-    """Слой доступа к sqlite3 для дейтинг-бота."""
+    """SQLite access layer for Str.Love bot."""
 
     def __init__(self, path: str):
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self.cursor = self.conn.cursor()
         self.create_tables()
+        self._run_migrations()
 
     def create_tables(self) -> None:
         self.cursor.execute(
@@ -21,15 +23,19 @@ class Database:
                 age INTEGER,
                 gender TEXT,
                 city TEXT,
+                latitude REAL,
+                longitude REAL,
                 photo_id TEXT,
                 bio TEXT,
                 username TEXT,
                 is_active INTEGER DEFAULT 1,
+                is_banned INTEGER DEFAULT 0,
                 balance INTEGER DEFAULT 0,
                 is_vip INTEGER DEFAULT 0,
                 vip_end_date TEXT,
                 daily_superlikes_left INTEGER DEFAULT 1,
-                superlikes_reset_at TEXT
+                superlikes_reset_at TEXT,
+                boosted_until TEXT
             )
             """
         )
@@ -42,6 +48,17 @@ class Database:
                 reaction TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(who_id, whom_id)
+            )
+            """
+        )
+        self.cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS matches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_a INTEGER,
+                user_b INTEGER,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_a, user_b)
             )
             """
         )
@@ -68,6 +85,19 @@ class Database:
         )
         self.cursor.execute(
             """
+            CREATE TABLE IF NOT EXISTS blind_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER,
+                sender_id INTEGER,
+                receiver_id INTEGER,
+                receiver_message_id INTEGER,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                deleted INTEGER DEFAULT 0
+            )
+            """
+        )
+        self.cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS shop_orders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER,
@@ -80,13 +110,27 @@ class Database:
         )
         self.conn.commit()
 
+    def _run_migrations(self) -> None:
+        self._ensure_column("users", "latitude", "REAL")
+        self._ensure_column("users", "longitude", "REAL")
+        self._ensure_column("users", "is_banned", "INTEGER DEFAULT 0")
+        self._ensure_column("users", "boosted_until", "TEXT")
+        self.conn.commit()
+
+    def _ensure_column(self, table: str, column: str, ddl: str) -> None:
+        self.cursor.execute(f"PRAGMA table_info({table})")
+        cols = {row["name"] for row in self.cursor.fetchall()}
+        if column not in cols:
+            self.cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
     def add_user(self, user_data: Tuple) -> None:
         self.cursor.execute(
             """
             INSERT OR REPLACE INTO users (
-                user_id, name, age, gender, city, photo_id, bio, username, is_active,
-                balance, is_vip, vip_end_date, daily_superlikes_left, superlikes_reset_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+                user_id, name, age, gender, city, latitude, longitude, photo_id, bio, username,
+                is_active, is_banned, balance, is_vip, vip_end_date, daily_superlikes_left,
+                superlikes_reset_at, boosted_until
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?, ?)
             """,
             user_data,
         )
@@ -100,32 +144,94 @@ class Database:
         self.cursor.execute("SELECT COUNT(*) FROM users")
         return self.cursor.fetchone()[0]
 
+    def get_active_users_count(self) -> int:
+        self.cursor.execute("SELECT COUNT(*) FROM users WHERE is_active = 1 AND is_banned = 0")
+        return self.cursor.fetchone()[0]
+
     def get_vip_count(self) -> int:
         self.cursor.execute("SELECT COUNT(*) FROM users WHERE is_vip = 1")
         return self.cursor.fetchone()[0]
 
+    def get_revenue(self) -> int:
+        self.cursor.execute("SELECT COALESCE(SUM(amount), 0) FROM shop_orders WHERE status = 'paid'")
+        return self.cursor.fetchone()[0]
+
     def get_all_user_ids(self) -> List[int]:
-        self.cursor.execute("SELECT user_id FROM users")
+        self.cursor.execute("SELECT user_id FROM users WHERE is_banned = 0")
         return [row[0] for row in self.cursor.fetchall()]
 
-    def get_candidate(self, user_id: int) -> Optional[sqlite3.Row]:
+    def ban_user(self, user_id: int) -> bool:
+        self.cursor.execute("UPDATE users SET is_banned = 1, is_active = 0 WHERE user_id = ?", (user_id,))
+        self.conn.commit()
+        return self.cursor.rowcount > 0
+
+    def get_who_liked_me(self, user_id: int) -> List[sqlite3.Row]:
+        self.cursor.execute(
+            """
+            SELECT u.* FROM likes l
+            JOIN users u ON u.user_id = l.who_id
+            WHERE l.whom_id = ?
+              AND l.reaction IN ('like', 'superlike')
+              AND l.who_id NOT IN (
+                SELECT whom_id FROM likes WHERE who_id = ? AND reaction IN ('like', 'superlike')
+              )
+            ORDER BY l.created_at DESC
+            """,
+            (user_id, user_id),
+        )
+        return self.cursor.fetchall()
+
+    @staticmethod
+    def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+        radius = 6371.0
+        phi1 = math.radians(lat1)
+        phi2 = math.radians(lat2)
+        dphi = math.radians(lat2 - lat1)
+        dlambda = math.radians(lon2 - lon1)
+        a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+        return 2 * radius * math.asin(math.sqrt(a))
+
+    def get_candidate(self, user_id: int) -> Optional[Tuple[sqlite3.Row, Optional[float]]]:
         me = self.get_user(user_id)
         if not me:
             return None
+
         target_gender = "female" if me["gender"] == "male" else "male"
         self.cursor.execute(
             """
             SELECT * FROM users
             WHERE user_id != ?
               AND is_active = 1
+              AND is_banned = 0
               AND gender = ?
               AND user_id NOT IN (SELECT whom_id FROM likes WHERE who_id = ?)
-            ORDER BY RANDOM()
-            LIMIT 1
+            ORDER BY
+              CASE
+                WHEN boosted_until IS NOT NULL AND boosted_until > CURRENT_TIMESTAMP THEN 0
+                WHEN is_vip = 1 THEN 1
+                ELSE 2
+              END,
+              RANDOM()
+            LIMIT 40
             """,
             (user_id, target_gender, user_id),
         )
-        return self.cursor.fetchone()
+        candidates = self.cursor.fetchall()
+        if not candidates:
+            return None
+
+        if me["latitude"] is None or me["longitude"] is None:
+            return candidates[0], None
+
+        closest = None
+        for row in candidates:
+            if row["latitude"] is None or row["longitude"] is None:
+                continue
+            dist = self.haversine_km(me["latitude"], me["longitude"], row["latitude"], row["longitude"])
+            if closest is None or dist < closest[1]:
+                closest = (row, dist)
+
+        return closest if closest else (candidates[0], None)
 
     def add_reaction(self, who_id: int, whom_id: int, reaction: str) -> None:
         self.cursor.execute(
@@ -136,10 +242,23 @@ class Database:
 
     def check_match(self, who_id: int, whom_id: int) -> bool:
         self.cursor.execute(
-            "SELECT 1 FROM likes WHERE who_id = ? AND whom_id = ? AND reaction = 'like'",
+            """
+            SELECT 1 FROM likes
+            WHERE who_id = ?
+              AND whom_id = ?
+              AND reaction IN ('like', 'superlike')
+            """,
             (whom_id, who_id),
         )
         return self.cursor.fetchone() is not None
+
+    def create_match(self, user_1: int, user_2: int) -> None:
+        user_a, user_b = sorted([user_1, user_2])
+        self.cursor.execute(
+            "INSERT OR IGNORE INTO matches (user_a, user_b) VALUES (?, ?)",
+            (user_a, user_b),
+        )
+        self.conn.commit()
 
     def change_balance(self, user_id: int, delta: int) -> bool:
         user = self.get_user(user_id)
@@ -157,6 +276,11 @@ class Database:
             "UPDATE users SET is_vip = 1, vip_end_date = ?, daily_superlikes_left = 6 WHERE user_id = ?",
             (vip_end_date, user_id),
         )
+        self.conn.commit()
+
+    def activate_boost(self, user_id: int, hours: int = 1) -> None:
+        boosted_until = (datetime.utcnow() + timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+        self.cursor.execute("UPDATE users SET boosted_until = ? WHERE user_id = ?", (boosted_until, user_id))
         self.conn.commit()
 
     def create_shop_order(self, user_id: int, item_code: str, amount: int, status: str = "paid") -> None:
@@ -199,6 +323,30 @@ class Database:
             (user_id, user_id),
         )
         return self.cursor.fetchone()
+
+    def register_blind_message(self, chat_id: int, sender_id: int, receiver_id: int, receiver_message_id: int) -> None:
+        self.cursor.execute(
+            """
+            INSERT INTO blind_messages (chat_id, sender_id, receiver_id, receiver_message_id)
+            VALUES (?, ?, ?, ?)
+            """,
+            (chat_id, sender_id, receiver_id, receiver_message_id),
+        )
+        self.conn.commit()
+
+    def get_expired_blind_messages(self, older_than_hours: int = 24) -> List[sqlite3.Row]:
+        self.cursor.execute(
+            """
+            SELECT * FROM blind_messages
+            WHERE deleted = 0 AND datetime(created_at) <= datetime('now', ?)
+            """,
+            (f"-{older_than_hours} hours",),
+        )
+        return self.cursor.fetchall()
+
+    def mark_blind_message_deleted(self, message_id: int) -> None:
+        self.cursor.execute("UPDATE blind_messages SET deleted = 1 WHERE id = ?", (message_id,))
+        self.conn.commit()
 
     def set_reveal_consent(self, chat_id: int, user_id: int) -> None:
         self.cursor.execute("SELECT user_a, user_b FROM blind_chats WHERE id = ?", (chat_id,))

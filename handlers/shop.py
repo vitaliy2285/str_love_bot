@@ -42,6 +42,16 @@ async def buy_vip(message: types.Message):
     db.create_shop_order(message.from_user.id, "vip_month", 299)
     await message.answer(
         "✅ VIP активирован на 30 дней (эмуляция оплаты).\n"
-        "Преимущества: корона, +5 суперлайков в день, выше в выдаче.",
+        "Преимущества: кто лайкнул тебя, +5 суперлайков в день, выше в выдаче.",
         reply_markup=shop_kb(),
     )
+
+
+@dp.message_handler(text="🚀 Boost (50 монет)")
+async def buy_boost(message: types.Message):
+    if not db.change_balance(message.from_user.id, -50):
+        await message.answer("Недостаточно монет для буста.")
+        return
+    db.activate_boost(message.from_user.id, hours=1)
+    db.create_shop_order(message.from_user.id, "boost_1h", 50)
+    await message.answer("🚀 Буст активирован на 1 час! Твоя анкета показывается чаще.", reply_markup=shop_kb())

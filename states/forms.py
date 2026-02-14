@@ -5,7 +5,7 @@ class RegState(StatesGroup):
     name = State()
     age = State()
     gender = State()
-    city = State()
+    location = State()
     photo = State()
     bio = State()
 

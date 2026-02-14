@@ -9,6 +9,19 @@ def _partner_id(chat_row, user_id: int) -> int:
     return chat_row["user_b"] if chat_row["user_a"] == user_id else chat_row["user_a"]
 
 
+async def cleanup_expired_blind_messages() -> int:
+    expired = db.get_expired_blind_messages(older_than_hours=24)
+    deleted_count = 0
+    for row in expired:
+        try:
+            await bot.delete_message(chat_id=row["receiver_id"], message_id=row["receiver_message_id"])
+        except Exception:
+            pass
+        db.mark_blind_message_deleted(row["id"])
+        deleted_count += 1
+    return deleted_count
+
+
 @dp.message_handler(text="🎭 Слепой чат")
 async def blind_chat_entry(message: types.Message):
     if not is_blind_chat_time():
@@ -66,9 +79,9 @@ async def exit_blind_chat(message: types.Message):
 @dp.message_handler(content_types=types.ContentTypes.TEXT)
 async def relay_blind_chat_message(message: types.Message):
     if message.text in {
-        "🚀 Искать пару", "👤 Мой профиль", "💎 Магазин", "🎭 Слепой чат",
-        "❤️ Лайк", "👎 Дизлайк", "💤 Стоп", "💌 Письмо (5 монет)",
-        "👑 VIP на месяц", "🪙 50 монет", "↩️ Назад", "🕵️ Раскрыть личность", "🛑 Выйти из слепого чата"
+        "🚀 Искать пару", "👤 Мой профиль", "💎 Магазин", "🎭 Слепой чат", "👀 Кто меня лайкнул",
+        "❤️ Лайк", "👎 Дизлайк", "⭐ Суперлайк", "💤 Стоп", "💌 Письмо (5 монет)",
+        "👑 VIP на месяц", "🪙 50 монет", "🚀 Boost (50 монет)", "↩️ Назад", "🕵️ Раскрыть личность", "🛑 Выйти из слепого чата"
     }:
         return
 
@@ -77,4 +90,5 @@ async def relay_blind_chat_message(message: types.Message):
         return
 
     partner_id = _partner_id(active, message.from_user.id)
-    await bot.send_message(partner_id, f"🎭 Аноним: {message.text}")
+    sent = await bot.send_message(partner_id, f"🎭 Аноним: {message.text}")
+    db.register_blind_message(active["id"], message.from_user.id, partner_id, sent.message_id)
