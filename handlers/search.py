@@ -1,113 +1,92 @@
+from typing import Union
+
 from aiogram import types
 from aiogram.dispatcher import FSMContext
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from keyboards.reply import menu_kb, vote_kb
 from loader import bot, db, dp
-from states.forms import SearchState
+
+CARD_PREFIX = "search:vote:"
 
 
-async def show_next_candidate(message: types.Message, state: FSMContext):
-    candidate_data = db.get_candidate(message.from_user.id)
+def vote_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(row_width=3).add(
+        InlineKeyboardButton("❌", callback_data=f"{CARD_PREFIX}dislike"),
+        InlineKeyboardButton("❤️", callback_data=f"{CARD_PREFIX}like"),
+        InlineKeyboardButton("⭐ Super", callback_data=f"{CARD_PREFIX}superlike"),
+    )
+
+
+def _distance_text(distance_km):
+    if distance_km is None:
+        return "неизвестно"
+    if distance_km < 1:
+        return "совсем рядом"
+    return f"{round(distance_km, 1)}"
+
+
+async def show_next_candidate(target: Union[types.Message, types.CallbackQuery], state: FSMContext):
+    message = target.message if isinstance(target, types.CallbackQuery) else target
+    user_id = target.from_user.id if isinstance(target, types.CallbackQuery) else target.from_user.id
+
+    candidate_data = db.get_candidate(user_id)
     if not candidate_data:
-        await message.answer("Пока анкеты закончились, попробуй позже.", reply_markup=menu_kb())
+        await message.answer("Пока анкеты закончились.")
         return
 
-    candidate, distance_km = candidate_data
+    candidate, _ = candidate_data
+    me = db.get_user(user_id)
+    distance_km = None
+    if me:
+        me_lat, me_lon = db._row_lat(me), db._row_lon(me)
+        cand_lat, cand_lon = db._row_lat(candidate), db._row_lon(candidate)
+        if None not in (me_lat, me_lon, cand_lat, cand_lon):
+            distance_km = db.haversine_km(me_lat, me_lon, cand_lat, cand_lon)
+
     async with state.proxy() as data:
         data["candidate_id"] = candidate["user_id"]
 
-    distance_line = f"📍 {int(distance_km)} km from you" if distance_km is not None else "📍 distance unknown"
-    caption = f"<b>{candidate['name']}, {candidate['age']}</b>\n{distance_line}\n\n{candidate['bio']}"
+    distance_text = _distance_text(distance_km)
+    caption = (
+        f"<b>{candidate['name']}, {candidate['age']}</b>\n"
+        f"📍 В {distance_text} км от тебя\n"
+        f"<i>{candidate['bio']}</i>"
+    )
     await message.answer_photo(candidate["photo_id"], caption=caption, reply_markup=vote_kb())
 
 
-@dp.message_handler(text="🚀 Искать пару")
-async def start_search(message: types.Message, state: FSMContext):
-    await show_next_candidate(message, state)
+@dp.callback_query_handler(lambda c: c.data == "menu:search")
+async def start_search(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await show_next_candidate(callback, state)
 
 
-@dp.message_handler(text=["❤️ Лайк", "👎 Дизлайк", "⭐ Суперлайк", "💤 Стоп"])
-async def vote_candidate(message: types.Message, state: FSMContext):
-    if message.text == "💤 Стоп":
-        await state.finish()
-        await message.answer("Поиск остановлен.", reply_markup=menu_kb())
-        return
-
+@dp.callback_query_handler(lambda c: c.data.startswith(CARD_PREFIX))
+async def vote_candidate(callback: types.CallbackQuery, state: FSMContext):
+    reaction = callback.data.replace(CARD_PREFIX, "")
     async with state.proxy() as data:
         candidate_id = data.get("candidate_id")
 
     if not candidate_id:
-        await show_next_candidate(message, state)
+        await callback.answer("Открой поиск заново.", show_alert=False)
+        await show_next_candidate(callback, state)
         return
 
-    reaction = "dislike"
-    if message.text == "❤️ Лайк":
-        reaction = "like"
-    elif message.text == "⭐ Суперлайк":
-        if not db.decrement_superlike(message.from_user.id):
-            await message.answer("Лимит суперлайков на сегодня исчерпан.")
-            return
-        reaction = "superlike"
+    if reaction == "superlike" and not db.decrement_superlike(callback.from_user.id):
+        await callback.answer("Лимит суперлайков исчерпан", show_alert=True)
+        return
 
-    db.add_reaction(message.from_user.id, candidate_id, reaction)
+    db.add_reaction(callback.from_user.id, candidate_id, reaction)
 
-    if reaction in {"like", "superlike"} and db.check_match(message.from_user.id, candidate_id):
-        db.create_match(message.from_user.id, candidate_id)
-        me = db.get_user(message.from_user.id)
+    if reaction in {"like", "superlike"} and db.check_match(callback.from_user.id, candidate_id):
+        db.create_match(callback.from_user.id, candidate_id)
+        me = db.get_user(callback.from_user.id)
         candidate = db.get_user(candidate_id)
-        await message.answer(f"💘 It's a Match! <b>{candidate['name']}</b> тоже лайкнул(а) тебя. Нажмите, чтобы начать чат.")
+        await callback.message.answer(f"💘 Это мэтч! <b>{candidate['name']}</b> тоже поставил(а) лайк.")
         try:
-            await bot.send_message(
-                candidate_id,
-                f"💘 It's a Match! <b>{me['name']}</b> лайкнул(а) тебя в ответ. Click here to chat.",
-            )
+            await bot.send_message(candidate_id, f"💘 Это мэтч! <b>{me['name']}</b> лайкнул(а) тебя в ответ.")
         except Exception:
             pass
 
-    await show_next_candidate(message, state)
-
-
-@dp.message_handler(text="💌 Письмо (5 монет)")
-async def send_letter_start(message: types.Message, state: FSMContext):
-    async with state.proxy() as data:
-        candidate_id = data.get("candidate_id")
-    if not candidate_id:
-        await message.answer("Сначала открой анкету через '🚀 Искать пару'.")
-        return
-
-    user = db.get_user(message.from_user.id)
-    if user["balance"] < 5:
-        await message.answer("Недостаточно монет. Открой '💎 Магазин'.", reply_markup=menu_kb())
-        return
-
-    await message.answer("Напиши короткое сообщение для отправки пользователю:")
-    await SearchState.letter_text.set()
-
-
-@dp.message_handler(state=SearchState.letter_text)
-async def send_letter_finish(message: types.Message, state: FSMContext):
-    async with state.proxy() as data:
-        candidate_id = data.get("candidate_id")
-    if not candidate_id:
-        await state.finish()
-        await message.answer("Кандидат не найден, начни поиск заново.", reply_markup=menu_kb())
-        return
-
-    if not db.change_balance(message.from_user.id, -5):
-        await state.finish()
-        await message.answer("Не удалось списать монеты.", reply_markup=menu_kb())
-        return
-
-    me = db.get_user(message.from_user.id)
-    try:
-        await bot.send_message(
-            candidate_id,
-            f"💌 Тебе пришло письмо до мэтча!\n"
-            f"От: <b>{me['name']}</b>\n"
-            f"Текст: {message.text}",
-        )
-    except Exception:
-        pass
-
-    await state.finish()
-    await message.answer("Письмо отправлено! Списано 5 монет.", reply_markup=vote_kb())
+    await callback.answer()
+    await show_next_candidate(callback, state)
