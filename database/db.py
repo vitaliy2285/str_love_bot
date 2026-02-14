@@ -1,7 +1,7 @@
 import math
 import sqlite3
 from datetime import datetime, timedelta
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 class Database:
@@ -37,7 +37,10 @@ class Database:
                 vip_end_date TEXT,
                 daily_superlikes_left INTEGER DEFAULT 1,
                 superlikes_reset_at TEXT,
-                boosted_until TEXT
+                boosted_until TEXT,
+                min_age INTEGER DEFAULT 18,
+                max_age INTEGER DEFAULT 99,
+                search_radius INTEGER DEFAULT 50
             )
             """
         )
@@ -119,6 +122,9 @@ class Database:
         self._ensure_column("users", "longitude", "REAL")
         self._ensure_column("users", "is_banned", "INTEGER DEFAULT 0")
         self._ensure_column("users", "boosted_until", "TEXT")
+        self._ensure_column("users", "min_age", "INTEGER DEFAULT 18")
+        self._ensure_column("users", "max_age", "INTEGER DEFAULT 99")
+        self._ensure_column("users", "search_radius", "INTEGER DEFAULT 50")
         self.conn.commit()
 
     def _ensure_column(self, table: str, column: str, ddl: str) -> None:
@@ -133,10 +139,17 @@ class Database:
             INSERT OR REPLACE INTO users (
                 user_id, name, age, gender, city, lat, lon, latitude, longitude, photo_id, bio, username,
                 is_active, is_banned, balance, is_vip, vip_end_date, daily_superlikes_left,
-                superlikes_reset_at, boosted_until
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?, ?)
+                superlikes_reset_at, boosted_until, min_age, max_age, search_radius
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?, ?, 18, 99, 50)
             """,
             user_data,
+        )
+        self.conn.commit()
+
+    def update_search_preferences(self, user_id: int, min_age: int, max_age: int, search_radius: int) -> None:
+        self.cursor.execute(
+            "UPDATE users SET min_age = ?, max_age = ?, search_radius = ? WHERE user_id = ?",
+            (min_age, max_age, search_radius, user_id),
         )
         self.conn.commit()
 
@@ -195,21 +208,28 @@ class Database:
         a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
         return 2 * radius * math.asin(math.sqrt(a))
 
+    def has_liked(self, who_id: int, whom_id: int) -> bool:
+        self.cursor.execute(
+            """
+            SELECT 1 FROM likes
+            WHERE who_id = ?
+              AND whom_id = ?
+              AND reaction IN ('like', 'superlike')
+            """,
+            (who_id, whom_id),
+        )
+        return self.cursor.fetchone() is not None
 
-    @staticmethod
-    def _row_lat(row: sqlite3.Row) -> Optional[float]:
-        return row["lat"] if "lat" in row.keys() and row["lat"] is not None else row["latitude"]
-
-    @staticmethod
-    def _row_lon(row: sqlite3.Row) -> Optional[float]:
-        return row["lon"] if "lon" in row.keys() and row["lon"] is not None else row["longitude"]
-
-    def get_candidate(self, user_id: int) -> Optional[Tuple[sqlite3.Row, Optional[float]]]:
+    def get_candidate(self, user_id: int) -> Optional[Tuple[sqlite3.Row, Optional[float], bool]]:
         me = self.get_user(user_id)
         if not me:
             return None
 
         target_gender = "female" if me["gender"] == "male" else "male"
+        min_age = me["min_age"] or 18
+        max_age = me["max_age"] or 99
+        search_radius = me["search_radius"] or 50
+
         self.cursor.execute(
             """
             SELECT * FROM users
@@ -217,6 +237,7 @@ class Database:
               AND is_active = 1
               AND is_banned = 0
               AND gender = ?
+              AND age BETWEEN ? AND ?
               AND user_id NOT IN (SELECT whom_id FROM likes WHERE who_id = ?)
             ORDER BY
               CASE
@@ -225,30 +246,35 @@ class Database:
                 ELSE 2
               END,
               RANDOM()
-            LIMIT 40
+            LIMIT 80
             """,
-            (user_id, target_gender, user_id),
+            (user_id, target_gender, min_age, max_age, user_id),
         )
         candidates = self.cursor.fetchall()
         if not candidates:
             return None
 
-        me_lat = self._row_lat(me)
-        me_lon = self._row_lon(me)
-        if me_lat is None or me_lon is None:
-            return candidates[0], None
+        has_my_location = me["latitude"] is not None and me["longitude"] is not None
+        filtered: List[Tuple[sqlite3.Row, Optional[float]]] = []
 
-        closest = None
         for row in candidates:
-            row_lat = self._row_lat(row)
-            row_lon = self._row_lon(row)
-            if row_lat is None or row_lon is None:
+            if not has_my_location or row["latitude"] is None or row["longitude"] is None:
+                filtered.append((row, None))
                 continue
-            dist = self.haversine_km(me_lat, me_lon, row_lat, row_lon)
-            if closest is None or dist < closest[1]:
-                closest = (row, dist)
 
-        return closest if closest else (candidates[0], None)
+            distance = self.haversine_km(me["latitude"], me["longitude"], row["latitude"], row["longitude"])
+            if distance <= search_radius:
+                filtered.append((row, distance))
+
+        if not filtered:
+            return None
+
+        if has_my_location:
+            filtered.sort(key=lambda item: (item[1] is None, item[1] if item[1] is not None else 10 ** 9))
+
+        candidate, distance_km = filtered[0]
+        liked_me = self.has_liked(candidate["user_id"], user_id)
+        return candidate, distance_km, liked_me
 
     def add_reaction(self, who_id: int, whom_id: int, reaction: str) -> None:
         self.cursor.execute(
@@ -257,17 +283,12 @@ class Database:
         )
         self.conn.commit()
 
+    def delete_reaction(self, who_id: int, whom_id: int) -> None:
+        self.cursor.execute("DELETE FROM likes WHERE who_id = ? AND whom_id = ?", (who_id, whom_id))
+        self.conn.commit()
+
     def check_match(self, who_id: int, whom_id: int) -> bool:
-        self.cursor.execute(
-            """
-            SELECT 1 FROM likes
-            WHERE who_id = ?
-              AND whom_id = ?
-              AND reaction IN ('like', 'superlike')
-            """,
-            (whom_id, who_id),
-        )
-        return self.cursor.fetchone() is not None
+        return self.has_liked(whom_id, who_id)
 
     def create_match(self, user_1: int, user_2: int) -> None:
         user_a, user_b = sorted([user_1, user_2])
@@ -341,7 +362,23 @@ class Database:
         )
         return self.cursor.fetchone()
 
+
+    def set_reveal_consent(self, chat_id: int, user_id: int) -> None:
+        chat = self.get_active_blind_chat(user_id)
+        if not chat or chat["id"] != chat_id:
+            return
+        field = "reveal_a" if chat["user_a"] == user_id else "reveal_b"
+        self.cursor.execute(f"UPDATE blind_chats SET {field} = 1 WHERE id = ?", (chat_id,))
+        self.conn.commit()
+
     def register_blind_message(self, chat_id: int, sender_id: int, receiver_id: int, receiver_message_id: int) -> None:
+        self.save_blind_message_link(chat_id, sender_id, receiver_id, receiver_message_id)
+
+    def close_blind_chat(self, chat_id: int) -> None:
+        self.cursor.execute("UPDATE blind_chats SET is_active = 0 WHERE id = ?", (chat_id,))
+        self.conn.commit()
+
+    def save_blind_message_link(self, chat_id: int, sender_id: int, receiver_id: int, receiver_message_id: int) -> None:
         self.cursor.execute(
             """
             INSERT INTO blind_messages (chat_id, sender_id, receiver_id, receiver_message_id)
@@ -351,13 +388,14 @@ class Database:
         )
         self.conn.commit()
 
-    def get_expired_blind_messages(self, older_than_hours: int = 24) -> List[sqlite3.Row]:
+    def get_expired_blind_messages(self, ttl_minutes: int = 60, older_than_hours: Optional[int] = None) -> List[sqlite3.Row]:
         self.cursor.execute(
             """
             SELECT * FROM blind_messages
-            WHERE deleted = 0 AND datetime(created_at) <= datetime('now', ?)
+            WHERE deleted = 0
+              AND datetime(created_at, ?) <= datetime('now')
             """,
-            (f"-{older_than_hours} hours",),
+            (f"+{(older_than_hours * 60) if older_than_hours is not None else ttl_minutes} minutes",),
         )
         return self.cursor.fetchall()
 
@@ -365,35 +403,31 @@ class Database:
         self.cursor.execute("UPDATE blind_messages SET deleted = 1 WHERE id = ?", (message_id,))
         self.conn.commit()
 
-    def set_reveal_consent(self, chat_id: int, user_id: int) -> None:
-        self.cursor.execute("SELECT user_a, user_b FROM blind_chats WHERE id = ?", (chat_id,))
-        row = self.cursor.fetchone()
-        if not row:
-            return
-        col = "reveal_a" if row["user_a"] == user_id else "reveal_b"
-        self.cursor.execute(f"UPDATE blind_chats SET {col} = 1 WHERE id = ?", (chat_id,))
-        self.conn.commit()
-
-    def close_blind_chat(self, chat_id: int) -> None:
-        self.cursor.execute("UPDATE blind_chats SET is_active = 0 WHERE id = ?", (chat_id,))
-        self.conn.commit()
-
-    def reset_daily_superlikes_if_needed(self, user_id: int) -> None:
+    def reset_superlikes_if_needed(self, user_id: int) -> None:
         user = self.get_user(user_id)
         if not user:
             return
-        now_day = datetime.utcnow().strftime("%Y-%m-%d")
-        if user["superlikes_reset_at"] == now_day:
-            return
-        base = 6 if user["is_vip"] else 1
-        self.cursor.execute(
-            "UPDATE users SET daily_superlikes_left = ?, superlikes_reset_at = ? WHERE user_id = ?",
-            (base, now_day, user_id),
-        )
-        self.conn.commit()
+
+        now = datetime.utcnow()
+        reset_at_str = user["superlikes_reset_at"]
+        should_reset = not reset_at_str
+        if reset_at_str:
+            try:
+                should_reset = now >= datetime.strptime(reset_at_str, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                should_reset = True
+
+        if should_reset:
+            daily_limit = 6 if user["is_vip"] else 1
+            next_reset = (now + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+            self.cursor.execute(
+                "UPDATE users SET daily_superlikes_left = ?, superlikes_reset_at = ? WHERE user_id = ?",
+                (daily_limit, next_reset, user_id),
+            )
+            self.conn.commit()
 
     def decrement_superlike(self, user_id: int) -> bool:
-        self.reset_daily_superlikes_if_needed(user_id)
+        self.reset_superlikes_if_needed(user_id)
         user = self.get_user(user_id)
         if not user or user["daily_superlikes_left"] <= 0:
             return False

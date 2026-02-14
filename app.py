@@ -15,7 +15,7 @@ async def blind_messages_gc_loop():
 
 async def on_startup(_):
     db.create_tables()
-    asyncio.create_task(blind_messages_gc_loop())
+    asyncio.create_task(cleanup_loop())
 
 
 if __name__ == "__main__":
