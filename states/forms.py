@@ -12,6 +12,7 @@ class RegState(StatesGroup):
 
 class SearchState(StatesGroup):
     letter_text = State()
+    compliment_text = State()
 
 
 class AdminState(StatesGroup):
