@@ -1,0 +1,103 @@
+from aiogram import types
+from aiogram.dispatcher import FSMContext
+
+from keyboards.reply import menu_kb, vote_kb
+from loader import bot, db, dp
+from states.forms import SearchState
+
+
+async def show_next_candidate(message: types.Message, state: FSMContext):
+    candidate = db.get_candidate(message.from_user.id)
+    if not candidate:
+        await message.answer("Пока анкеты закончились, попробуй позже.", reply_markup=menu_kb())
+        return
+
+    async with state.proxy() as data:
+        data["candidate_id"] = candidate["user_id"]
+
+    caption = f"<b>{candidate['name']}, {candidate['age']}</b>\n📍 {candidate['city']}\n\n{candidate['bio']}"
+    await message.answer_photo(candidate["photo_id"], caption=caption, reply_markup=vote_kb())
+
+
+@dp.message_handler(text="🚀 Искать пару")
+async def start_search(message: types.Message, state: FSMContext):
+    await show_next_candidate(message, state)
+
+
+@dp.message_handler(text=["❤️ Лайк", "👎 Дизлайк", "💤 Стоп"])
+async def vote_candidate(message: types.Message, state: FSMContext):
+    if message.text == "💤 Стоп":
+        await state.finish()
+        await message.answer("Поиск остановлен.", reply_markup=menu_kb())
+        return
+
+    async with state.proxy() as data:
+        candidate_id = data.get("candidate_id")
+
+    if not candidate_id:
+        await show_next_candidate(message, state)
+        return
+
+    reaction = "like" if message.text == "❤️ Лайк" else "dislike"
+    db.add_reaction(message.from_user.id, candidate_id, reaction)
+
+    if reaction == "like" and db.check_match(message.from_user.id, candidate_id):
+        me = db.get_user(message.from_user.id)
+        candidate = db.get_user(candidate_id)
+        await message.answer(f"🔥 Взаимная симпатия с <b>{candidate['name']}</b>!")
+        try:
+            await bot.send_message(candidate_id, f"🔥 У тебя мэтч с <b>{me['name']}</b>!")
+        except Exception:
+            pass
+
+    await show_next_candidate(message, state)
+
+
+@dp.message_handler(text="💌 Письмо (5 монет)")
+async def send_letter_start(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        candidate_id = data.get("candidate_id")
+    if not candidate_id:
+        await message.answer("Сначала открой анкету через '🚀 Искать пару'.")
+        return
+
+    user = db.get_user(message.from_user.id)
+    if user["balance"] < 5:
+        await message.answer("Недостаточно монет. Открой '💎 Магазин'.", reply_markup=menu_kb())
+        return
+
+    if not db.decrement_superlike(message.from_user.id):
+        await message.answer("Лимит суперлайков на сегодня исчерпан.")
+        return
+
+    await message.answer("Напиши короткое сообщение для отправки пользователю:")
+    await SearchState.letter_text.set()
+
+
+@dp.message_handler(state=SearchState.letter_text)
+async def send_letter_finish(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        candidate_id = data.get("candidate_id")
+    if not candidate_id:
+        await state.finish()
+        await message.answer("Кандидат не найден, начни поиск заново.", reply_markup=menu_kb())
+        return
+
+    if not db.change_balance(message.from_user.id, -5):
+        await state.finish()
+        await message.answer("Не удалось списать монеты.", reply_markup=menu_kb())
+        return
+
+    me = db.get_user(message.from_user.id)
+    try:
+        await bot.send_message(
+            candidate_id,
+            f"💌 Тебе пришло письмо до мэтча!\n"
+            f"От: <b>{me['name']}</b>\n"
+            f"Текст: {message.text}",
+        )
+    except Exception:
+        pass
+
+    await state.finish()
+    await message.answer("Письмо отправлено! Списано 5 монет.", reply_markup=vote_kb())
